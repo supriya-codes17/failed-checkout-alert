@@ -39,3 +39,27 @@ Node.js, Shopify CLI, React Router app template, Prisma (SQLite), Telegram Bot A
 
 ## Note
 Demo project built on a Shopify development store.
+## Case study: fixing a webhook race that hid recovered orders
+
+**Problem.** In my first end-to-end test, an abandoned checkout triggered the Telegram alert correctly. The customer then used the recovery link and paid. The dashboard data still showed the checkout as `completed` instead of `recovered`, so the app could not prove it had saved the sale (`alertedAt` was set, `recoveredAt` was empty).
+
+**Root cause.** When an order is paid, Shopify sends two webhooks: `checkouts/update` (with `completed_at`) and `orders/create`. The first handler correctly moved the checkout from `alerted` to `recovered`. The second handler then ran, saw a status that was no longer `alerted`, and overwrote `recovered` with `completed`.
+
+**Fix.** The `orders/create` handler now only changes a checkout that is still `open` or `alerted`. Final statuses are never overwritten:
+
+```ts
+if (existing && (existing.status === "open" || existing.status === "alerted")) {
+  const wasAlerted = existing.status === "alerted";
+  await db.checkout.update({
+    where: { token },
+    data: {
+      status: wasAlerted ? "recovered" : "completed",
+      recoveredAt: wasAlerted ? new Date() : null,
+    },
+  });
+}
+```
+
+**Result.** After the fix, a new test checkout went `open -> alerted -> recovered` with both `alertedAt` and `recoveredAt` filled in (see the database screenshot above).
+
+**Takeaway.** Shopify can deliver related webhooks in any order and more than once, so handlers must be idempotent and must not overwrite a final state.
